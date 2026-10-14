@@ -1,0 +1,202 @@
+package com.edag.seethroughapplication.videoStreaming   // TODO: keep your original package name
+
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Rect
+import android.graphics.RectF
+import android.view.View
+import com.edag.seethroughapplication.Constants
+import kotlin.math.roundToInt
+import kotlin.math.tan
+
+/**
+ * One camera strip inside the stitched bitmap.
+ *
+ * imgStart..imgEnd : horizontal range in the bitmap, as a fraction 0..1 of its width
+ * angStart..angEnd : the real-world direction that strip covers, in degrees relative to
+ *                    the car's front (0 = front, +90 = right, 180 = back, 270 = left).
+ *                    angEnd must be greater than angStart. Angles may go below 0 or above 360.
+ *
+ * Anything not covered by a segment is drawn black.
+ */
+data class PanoSegment(
+    val imgStart: Float,
+    val imgEnd: Float,
+    val angStart: Float,
+    val angEnd: Float
+)
+
+/**
+ * Panorama background that stays locked to the 3D cockpit camera.
+ *
+ * Both views use the same head angles and the same pinhole projection
+ * (Constants.MODEL_VERTICAL_FOV_DEG). Horizontal placement comes from
+ * Constants.PANORAMA_SEGMENTS. Vertically the whole image is scaled by ONE factor and moved
+ * by the pitch; where the footage has no picture the screen stays black (nothing is stretched).
+ */
+class PanoramaView(
+    context: Context,
+    private val carHeading: Float
+) : View(context) {
+
+    private val textPaint = Paint().apply {
+        color = Color.WHITE
+        textSize = 40f
+    }
+
+    private val bitmapPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
+    private val srcRect = Rect()
+    private val dstRect = RectF()
+
+    private var headingDeg = 0f      // compass-style heading, 0..360 (+ = turn right)
+    private var pitchUpDeg = 0f      // + = look up
+    private var rollDeg = 0f         // optional
+    private var lastCenterAngle = 0f // for the debug overlay
+    private var lastVStretch = 1f    // for the debug overlay (1.0 = footage at its own proportions)
+
+    // ---------------------------------------------------------
+    // Public API
+    // ---------------------------------------------------------
+
+    fun updateHeading(newHeading: Float) {
+        headingDeg = normalizeAngle(newHeading)
+        postInvalidateOnAnimation()
+    }
+
+    /** + = look up. */
+    fun updatePitch(newPitchUp: Float) {
+        pitchUpDeg = newPitchUp
+        postInvalidateOnAnimation()
+    }
+
+    fun updateRoll(newRoll: Float) {
+        rollDeg = newRoll
+        postInvalidateOnAnimation()
+    }
+
+    fun resetView() {
+        headingDeg = 0f
+        pitchUpDeg = 0f
+        rollDeg = 0f
+        postInvalidateOnAnimation()
+    }
+
+    private fun normalizeAngle(angle: Float): Float = ((angle % 360f) + 360f) % 360f
+
+    // ---------------------------------------------------------
+    // Drawing
+    // ---------------------------------------------------------
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+
+        canvas.drawColor(Color.BLACK)
+
+        val bitmap = MJPEGRepository.latestBitmap
+        if (bitmap == null) {
+            canvas.drawText("Waiting for MJPEG stream...", 100f, 100f, textPaint)
+            postInvalidateOnAnimation()
+            return
+        }
+
+        canvas.save()
+        if (rollDeg != 0f) canvas.rotate(rollDeg, width / 2f, height / 2f)
+        drawPanorama(canvas, bitmap)
+        canvas.restore()
+
+        drawDebug(canvas, bitmap)
+
+        postInvalidateOnAnimation()
+    }
+
+    private fun drawPanorama(canvas: Canvas, bitmap: Bitmap) {
+        val pw = bitmap.width.toFloat()
+        val segments = Constants.PANORAMA_SEGMENTS
+        if (pw <= 0f || bitmap.height <= 0 || width == 0 || height == 0 || segments.isEmpty()) return
+
+        // 1. Same pinhole camera as the 3D scene
+        val halfVFovRad = Math.toRadians(Constants.MODEL_VERTICAL_FOV_DEG / 2.0)
+        val fPx = ((height / 2f) / tan(halfVFovRad)).toFloat()
+        val pxPerDeg = fPx * (Math.PI / 180.0).toFloat()   // exact at the screen centre
+
+        // 2. Direction we are looking at, relative to the car front: 0..360 (0 = front, + = right)
+        val centerAngle = normalizeAngle(
+            Constants.PANORAMA_TURN_SIGN * (headingDeg - carHeading) +
+                    Constants.PANORAMA_YAW_OFFSET_DEG
+        )
+        lastCenterAngle = centerAngle
+
+        // 3. Vertical placement: ONE scale for the whole image, moved by the pitch.
+        //    PANORAMA_VERTICAL_FOV_DEG = how many degrees of elevation the (cropped) footage covers.
+        val cfgV = Constants.PANORAMA_VERTICAL_FOV_DEG
+        val vFov = if (Constants.PANORAMA_AUTO_FILL) {
+            // never less than the screen needs, so the normal view has no gap
+            maxOf(cfgV, Constants.MODEL_VERTICAL_FOV_DEG + 2f * Constants.PANORAMA_PITCH_MARGIN_DEG)
+        } else {
+            cfgV
+        }
+        lastVStretch = vFov / cfgV
+
+        val eTop = vFov * Constants.PANORAMA_HORIZON_FRAC
+        val eBottom = vFov * (1f - Constants.PANORAMA_HORIZON_FRAC)
+        val dstH = fPx * (elevTan(eTop) + elevTan(eBottom))              // image height on screen
+        val horizonY = height / 2f + fPx * elevTan(pitchUpDeg)           // horizon line position
+        val top = horizonY - Constants.PANORAMA_HORIZON_FRAC * dstH
+        val bottom = top + dstH
+        // Above 'top' and below 'bottom' there is no footage, so those areas stay black.
+
+        // Source rows of the bitmap to use (lets you cut off black borders left by the stitcher)
+        val srcTopPx = (Constants.PANORAMA_SRC_TOP_FRAC * bitmap.height).roundToInt()
+        val srcBottomPx = (Constants.PANORAMA_SRC_BOTTOM_FRAC * bitmap.height).roundToInt()
+        if (srcBottomPx <= srcTopPx) return
+
+        // 4. Draw every camera strip at -360, 0, +360 so wrap-around never jumps
+        val cx = width / 2f
+        for (s in segments) {
+            val x0 = (s.imgStart * pw).roundToInt()
+            val x1 = (s.imgEnd * pw).roundToInt()
+            if (x1 <= x0) continue
+            srcRect.set(x0, srcTopPx, x1, srcBottomPx)
+            for (k in -1..1) {
+                val left = cx + (s.angStart + 360f * k - centerAngle) * pxPerDeg
+                val right = cx + (s.angEnd + 360f * k - centerAngle) * pxPerDeg
+                if (right < 0f || left > width) continue
+                dstRect.set(left, top, right, bottom)
+                canvas.drawBitmap(bitmap, srcRect, dstRect, bitmapPaint)
+            }
+        }
+    }
+
+    /** tan() of an elevation angle in degrees, limited so it never blows up near 90. */
+    private fun elevTan(deg: Float): Float =
+        tan(Math.toRadians(deg.toDouble().coerceIn(-80.0, 80.0))).toFloat()
+
+    /** Which strip and which part of the image is under the screen centre. */
+    private fun locate(angle: Float): String {
+        for ((i, s) in Constants.PANORAMA_SEGMENTS.withIndex()) {
+            for (k in -1..1) {
+                val a = angle + 360f * k
+                if (a >= s.angStart && a <= s.angEnd) {
+                    val t = (a - s.angStart) / (s.angEnd - s.angStart)
+                    val frac = s.imgStart + t * (s.imgEnd - s.imgStart)
+                    return "strip $i at ${(frac * 100).toInt()}% of image"
+                }
+            }
+        }
+        return "black gap"
+    }
+
+    private fun drawDebug(canvas: Canvas, bitmap: Bitmap) {
+        if (!Constants.PANORAMA_DEBUG) return
+        canvas.drawText("Car: ${carHeading.toInt()} deg", 40f, 80f, textPaint)
+        canvas.drawText("Heading: ${headingDeg.toInt()} deg", 40f, 130f, textPaint)
+        canvas.drawText("Relative: ${lastCenterAngle.toInt()} deg", 40f, 180f, textPaint)
+        canvas.drawText("Pitch up: ${pitchUpDeg.toInt()} deg", 40f, 230f, textPaint)
+        canvas.drawText("Centre: ${locate(lastCenterAngle)}", 40f, 280f, textPaint)
+        canvas.drawText("Bitmap: ${bitmap.width} x ${bitmap.height}", 40f, 330f, textPaint)
+        canvas.drawText("Vertical stretch: x${"%.2f".format(lastVStretch)}", 40f, 380f, textPaint)
+    }
+}

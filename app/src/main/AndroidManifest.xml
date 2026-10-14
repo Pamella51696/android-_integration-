@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Internet permission for fetching the videos -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.READ_SETTINGS"/>
+
+    <!--    android:dataExtractionRules="@xml/data_extraction_rules"-->
+    <!--    android:fullBackupContent="@xml/backup_rules"-->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.WRITE_SETTINGS"/>
+
+    <!-- Front camera for head-tracking zoom/tilt -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.front" android:required="false" />
+
+    <application
+        android:allowBackup="true"
+        android:usesCleartextTraffic="true"
+        android:hardwareAccelerated="true"
+
+        android:icon="@drawable/car"
+        android:label="@string/app_name"
+        android:roundIcon="@drawable/car"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.SeeThroughApplication">
+        <activity
+            android:name=".MainActivity"
+            android:screenOrientation="portrait"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:theme="@style/Theme.SeeThroughApplication">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <service
+            android:name=".AppMonitorService"
+            android:exported="false" />
+    </application>
+
+</manifest>
