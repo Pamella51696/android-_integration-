@@ -32,6 +32,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
 import com.edag.seethroughapplication._3DModel.DriverViewScreen
+import com.edag.seethroughapplication.curboverlay.CurbOverlayConfig
+import com.edag.seethroughapplication.curboverlay.CurbOverlayLayer
 import kotlin.text.toFloatOrNull
 
 // Purely a UI-placement concept for the button row - has nothing to
@@ -89,6 +91,9 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         var instance: MainActivity? = null
+
+        /** Set to false to disable PR7 curb overlay without removing the package. */
+        private const val ENABLE_CURB_OVERLAY = true
     }
 
     private var disableDialog: AlertDialog? = null
@@ -137,6 +142,7 @@ class MainActivity : ComponentActivity() {
                         mutableStateOf(false)
                     }
                     var isIPValueAvailable by remember { mutableStateOf(false) }
+                    var middlewareHost by remember { mutableStateOf("") }
                     val position by phonePositionObject.position.collectAsState()
                     val phoneRoll = position["roll"]?.toFloatOrNull() ?: 0f
 
@@ -186,6 +192,16 @@ class MainActivity : ComponentActivity() {
                                     )
                                 }
 
+                            }
+
+                            if (ENABLE_CURB_OVERLAY && middlewareHost.isNotBlank()) {
+                                CurbOverlayLayer(
+                                    config = CurbOverlayConfig.forHost(
+                                        host = middlewareHost,
+                                        enabled = true,
+                                    ),
+                                    modifier = Modifier.fillMaxSize(),
+                                )
                             }
 
                             // "Set Front" button row. In portrait it sits at
@@ -255,6 +271,7 @@ class MainActivity : ComponentActivity() {
 
                                 Button(
                                     onClick = {
+                                        middlewareHost = ipAddress
                                         isIPValueAvailable = true
                                         MJPEGRepository.start(ipAddress)
                                     }
